@@ -1,0 +1,688 @@
+---
+title: "SIBS Hack-a-thon"
+author: "Keely Grice and Lou Lindsley"
+date: "7/18/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Import Dataset and Libraries
+```{r}
+mi <- read.csv("Myocardial infarction complications Database.csv")
+mi1 <- mi
+
+#libraries
+library(tidyverse)
+library(naniar)
+library(scales)
+library(car)
+library(bestglm)
+library(glmnet)
+library(pROC)
+library(VIM)
+```
+## Descriptive Analysis
+```{r}
+#Quick look at demographics
+hist(mi$AGE, na.rm=TRUE, col="darkred")
+
+(prop.table(table(mi$SEX)))
+#0=Female, 1=Male
+pie(table(mi$SEX), 
+    col = c("white", "darkred"), 
+    labels = c("Female: 37.35%", "Male: 62.65%"),  
+    main = "Distribution of Sex",  
+)
+```
+
+## Imputation
+```{r}
+#Remove variables with high levels of NA
+#Counting NA per variable
+na_counts_base <- colSums(is.na(mi1))
+#print(na_counts_base)
+
+#Variables with >500 missing
+is.vector(na_counts_base)
+#print(na_counts_base[na_counts_base > 500])
+
+#Removing >500 NA variables
+remove_vars <- c("IBS_NASL", "S_AD_KBRIG", "D_AD_KBRIG", "KFK_BLOOD", "NA_KB", "NOT_NA_KB", "LID_KB", "DLIT_AG", "GIPO_K", "GIPER_NA")
+
+for (col in remove_vars){
+  mi1[[col]] <- NULL
+}
+summary(mi1$IBS_NASL)
+```
+Drop observations based on previous research that supports correlation with MI relapse. Also dropping binary variables that have an associated continuous variable.
+```{r}
+#Variables with 200-500 NA
+#print(na_counts_base[na_counts_base >200& na_counts_base<=500])
+
+#Remove missing
+#Variables of interest
+remove_obs <- c("endocr_02", "NITR_S")
+
+#Keep only complete rows
+mi1 <- mi1[complete.cases(mi1[remove_obs]), ]
+
+#Verify
+summary(mi1$NITR_S)
+summary(mi1$endocr_02)
+```
+Percent missing after dropping variables/observations
+```{r}
+sum(is.na(mi1), na.rm=TRUE) / prod(dim(mi1))
+```
+Imputation for variables with low levels of NA. Method selected due to distribution of each variable.
+```{r}
+#Median (for skewed distributions)
+#Select variables
+#print(names(mi1))
+na_median_vars <- c("AGE", "FK_STENOK", "IBS_POST", "GB", "lat_im", "fibr_ter_01", "fibr_ter_02", "fibr_ter_03", "fibr_ter_05", "fibr_ter_06",  "fibr_ter_07", "fibr_ter_08", "L_BLOOD", "TIME_B_S", "R_AB_1_n", "R_AB_2_n", "R_AB_3_n", "NA_R_1_n", "NA_R_2_n", "NA_R_3_n", "NOT_NA_1_n", "NOT_NA_2_n", "NOT_NA_3_n", "LID_S_n", "B_BLOK_S_n", "ANT_CA_S_n", "S_AD_ORIT", "D_AD_ORIT", "K_BLOOD", "NA_BLOOD", "ALT_BLOOD", "AST_BLOOD", "ROE", "GEPAR_S_n", "INF_ANAM", "endocr_01", "ant_im", "n_r_ecg_p_01", "n_r_ecg_p_02", "n_r_ecg_p_03", "n_r_ecg_p_04", "n_r_ecg_p_05", "n_r_ecg_p_06", "n_r_ecg_p_07", "n_r_ecg_p_08", "n_r_ecg_p_09", "n_r_ecg_p_10", "n_p_ecg_p_01", "n_p_ecg_p_02", "n_p_ecg_p_03","n_p_ecg_p_04", "n_p_ecg_p_05","n_p_ecg_p_06", "n_p_ecg_p_07", "n_p_ecg_p_08", "n_p_ecg_p_09", "n_p_ecg_p_10", "n_p_ecg_p_11", "n_p_ecg_p_12", "ASP_S_n", "TIKL_S_n", "TRENT_S_n")
+
+# Loop for imputation
+for(col in na_median_vars){
+  median_val <- median(mi1[[col]], na.rm=TRUE)
+  mi1[[col]][is.na(mi1[[col]])] <- median_val
+}
+
+#Verify loop ran correctly
+summary(mi1$AGE)
+```
+Mode imputation, mostly for binary or U-shaped curves
+```{r}
+#Select variables for mode
+na_mode_vars <- c("SIM_GIPERT", "ZSN_A", "nr_11", "nr_01", "nr_02", "nr_03", "nr_04", "nr_07", "nr_08",  "np_01", "np_04", "np_05", "np_07", "np_08", "np_09", "np_10", "endocr_03", "zab_leg_01", "zab_leg_02", "zab_leg_03", "zab_leg_04", "zab_leg_06", "O_L_POST", "K_SH_POST", "MP_TP_POST", "SVT_POST", "GT_POST", "FIB_G_POST", "inf_im", "post_im", "IM_PG_P", "ritm_ecg_p_01", "ritm_ecg_p_02", "ritm_ecg_p_04", "ritm_ecg_p_06", "ritm_ecg_p_07", "ritm_ecg_p_08")
+
+# Loop for mode
+for(col in na_mode_vars){
+  mode_val <- as.numeric(names(sort(table(mi1[[col]], useNA="ifany"), decreasing=TRUE))[1])
+  mi1[[col]][is.na(mi1[[col]])] <- mode_val
+}
+
+# Convert variables back to numeric
+mi1[] <- lapply(mi1, as.numeric)
+
+# Verify
+summary(mi1$ZSN_A)
+```
+Mean imputation for normal curve variables
+```{r}
+#Imputation with mean
+mi1$STENOK_AN[which(is.na(mi1$STENOK_AN))] <- mean (mi1$STENOK_AN, na.rm=TRUE)
+summary(mi1$STENOK_AN)
+```
+# Nearest Neighbors Imputation
+```{r}
+#New dataset for k-NN
+mi2 <- mi
+
+#Removing >500 NA variables
+remove_vars <- c("IBS_NASL", "S_AD_KBRIG", "D_AD_KBRIG", "KFK_BLOOD", "NA_KB", "NOT_NA_KB", "LID_KB", "DLIT_AG", "GIPO_K", "GIPER_NA")
+for (col in remove_vars){
+  mi2[[col]] <- NULL
+}
+```
+Determining outliers for NN
+```{r}
+#Z score method for outliers
+identify_outliers <- function(x){
+  mean_x <- mean(x, na.rm = TRUE)
+  sd_x <- sd(x, na.rm = TRUE)
+  outliers <- abs((x - mean_x) / sd_x) > 3
+  return(sum(outliers, na.rm = TRUE))
+}
+
+#Outliers per variable
+outliers_counts <- sapply(mi, identify_outliers)
+```
+Handling outliers
+```{r}
+#Summary of outliers
+outliers_list <- data.frame(variable=names(outliers_counts), outlier_freq = outliers_counts)
+#print(outliers_list)
+print(outliers_list[outliers_list$outlier_freq > 100, ])
+
+summary(mi$zab_leg_01) #binary
+summary(mi$zab_leg_02) #binary
+summary(mi$O_L_POST) #binary
+summary(mi$MP_TP_POST) #binary
+summary(mi$n_p_ecg_p_07) #binary, 115 missing
+summary(mi$OTEK_LANC) #binary, no missing
+summary(mi$REC_IM) #binary, no missing
+summary(mi$P_IM_STEN) #binary, no missing
+```
+k-NN Imputation
+```{r}
+# Impute missing values using kNN method
+#k=sqrt(n) /2
+mi2 <- kNN(mi2, k=21) #large k value to diminish impact of outliers, can use because large dataset
+summary(mi2$zab_leg_01)
+
+#Estimating bias for k-NN
+mean(subset(mi2, endocr_02=1 & endocr_02_imp==FALSE)$REC_IM) - 
+  mean(subset(mi2, endocr_02=1 & endocr_02_imp == TRUE)$REC_IM)
+```
+
+## Modeling: LASSO
+```{r}
+#determine column index
+which(colnames(mi2) == "OTEK_LANC") #108
+which(colnames(mi2) == "FIBR_PREDS") #103
+which (colnames(mi2)== "REC_IM") #112
+
+#print(colnames(mi2))
+#Establish variable matrix
+yy <- mi2[,"REC_IM"]
+xx <- as.matrix(mi2[,c(2:102, 104:107, 109:111, 113, 114)]) #start at 2 bc of ID
+yy[1:6]
+#head(xx)
+
+# Fit regression model
+fit.full <- glm(REC_IM ~ AGE+SEX+INF_ANAM+STENOK_AN+FK_STENOK+IBS_POST+GB+SIM_GIPERT+ZSN_A+nr_11+nr_01+nr_02+nr_03+nr_04+nr_07+nr_08+np_01+np_04+np_05+np_07+np_08+np_09+np_10+endocr_01+endocr_02+endocr_03+zab_leg_01+zab_leg_02+zab_leg_03+zab_leg_04+zab_leg_06+S_AD_ORIT+D_AD_ORIT+O_L_POST+K_SH_POST+MP_TP_POST+SVT_POST+GT_POST+FIB_G_POST+ant_im+lat_im+ inf_im+ post_im+IM_PG_P+ritm_ecg_p_01+ritm_ecg_p_02+ritm_ecg_p_04+ritm_ecg_p_06+ritm_ecg_p_07+ritm_ecg_p_08+n_r_ecg_p_01+n_r_ecg_p_02+n_r_ecg_p_03+n_r_ecg_p_04+n_r_ecg_p_05+n_r_ecg_p_06+n_r_ecg_p_08+ n_r_ecg_p_09+n_r_ecg_p_10+n_p_ecg_p_01+n_p_ecg_p_03+n_p_ecg_p_04+n_p_ecg_p_05+n_p_ecg_p_06+ n_p_ecg_p_07+n_p_ecg_p_08+n_p_ecg_p_09+n_p_ecg_p_10+n_p_ecg_p_11+n_p_ecg_p_12+fibr_ter_01+ fibr_ter_02+fibr_ter_03+fibr_ter_05+fibr_ter_06+fibr_ter_07+fibr_ter_08+K_BLOOD+NA_BLOOD+ALT_BLOOD+AST_BLOOD+L_BLOOD+ROE+TIME_B_S+R_AB_1_n+R_AB_2_n+R_AB_3_n+NITR_S+NA_R_1_n+NA_R_2_n+NA_R_3_n+ NOT_NA_1_n+NOT_NA_2_n+NOT_NA_3_n+LID_S_n+ B_BLOK_S_n + ANT_CA_S_n+ GEPAR_S_n+ ASP_S_n+ TIKL_S_n+ TRENT_S_n+ PREDS_TAH+ JELUD_TAH+FIBR_JELUD+A_V_BLOK+RAZRIV+DRESSLER, data = mi2, family = 'binomial')
+
+xx <- model.matrix(fit.full)
+
+# - Drop intercept (don't want to enter twice)
+xx <- xx[,-1]
+#head(xx)
+
+#Fit model
+fit.lasso <- glmnet(xx, yy, alpha=1, standardize=TRUE, family = 'binomial')
+plot(fit.lasso, label=TRUE, xvar="lambda")
+
+plot(fit.lasso, label=TRUE, xvar="lambda",
+     ylim = c(0.02,-0.02))
+
+#Cross validation
+set.seed(823)
+cv.lasso <- cv.glmnet(xx, yy, alpha=1, standardize=TRUE, nfolds=10, family = 'binomial')
+plot(cv.lasso)
+
+#Lambda to minimize 
+cv.lasso$lambda.min; log(cv.lasso$lambda.min)
+
+# - Regression coefficients for selected model
+lasso.coef <- coef(cv.lasso, s=cv.lasso$lambda.min)
+lasso.coef
+#print(colnames(lasso.coef))
+
+
+names_vec <- c("Intercept", "AGE", "SEX", "STENOK_AN", "IBS_POST", "nr_03", "np_01", "np_10", "endocr_01", "zab_leg_01", "zab_leg_02", "K_SH_POST", "GT_POST", "ant_im", "lat_im", "inf_im", "ritm_ecg_p_02", "ritm_ecg_p_07", "n_r_ecg_p_06", "n_r_ecg_p_09", "n_p_ecg_p_10", "n_p_ecg_p_11", "L_BLOOD", "TIME_B_S", "R_AB_3_n", "NA_R_1_n", "NA_R_2_n", "NOT_NA_2_n", "ANT_CA_S_n", "GEPAR_S_n", "TRENT_S_n", "JELUD_TAH", "RAZRIV")
+values_vec <- c(-3.872650783, 0.013210234, -0.056133779, 0.109313487, 0.025441077, 0.380855886, 3.273515765, 0.624664191, 0.057440016, -0.249978902, 0.267672189, -0.969742357, 1.291742690, 0.006665322, 0.017420817, -0.008555341, -0.085165267, 0.231759605, -0.528419623, 0.480204650, -0.015741302, 0.416474917, 0.026360654, -0.008852496, 0.839772279, 0.051367141, 0.275941997, 0.020393540, -0.086638478, 0.164218762, -0.112287674, 0.235461104, -0.275648204)
+
+lasso.df <- data.frame(
+  names = names_vec,
+  values = values_vec,
+  stringsAsFactors = FALSE  # Ensure strings are not converted to factors
+)
+is.numeric(lasso.df$values)
+```
+Predicting Y Based on k-NN
+```{r}
+#Removing intercept from matrix
+cols_to_include <- setdiff(lasso.df$names, "Intercept")
+subset_mi2 <- mi2[, cols_to_include, drop = FALSE]
+
+lasso.df2 <- lasso.df[-1, ]
+subset_mi2[] <- lapply(subset_mi2, as.numeric)
+
+#Predicting Y values
+Y_pred <- -3.872650783 + as.matrix(subset_mi2[, lasso.df2$names]) %*% as.vector(lasso.df2$values)
+head(Y_pred)
+summary(Y_pred)
+
+#Turn log odds into P()
+y_pred <- exp(Y_pred) / (1+exp(Y_pred))
+head(y_pred)
+summary(y_pred)
+
+#Assign to original dataset as new variable
+mi2$y_pred <- y_pred
+```
+# Calibration for LASSO (k-NN)
+```{r}
+#Calibration in the large
+mean(mi2$y_pred)       
+mean(mi2$REC_IM)
+
+#Calibration plot set-up 
+#Make deciles
+dec <- quantile(mi2$y_pred,            
+                probs=seq(0,1,by=0.1), 
+                type=3)                
+dec 
+
+#Add deciles as variable to dataset
+mi2$dec_grp <- cut(mi2$y_pred,         
+                   breaks = dec,       
+                   include.lowest = T, 
+                   labels = 1:10)      
+
+#Verify decile groups are even
+table(mi2$dec_grp)  
+prop.table(table(mi2$dec_grp))         
+
+#Compute mean predicted probability and event rate by decile group
+mi2$y_pred <- as.numeric(mi2$y_pred)
+summary(mi2$y_pred)
+
+agg <- aggregate(cbind(REC_IM, y_pred) ~ dec_grp, 
+                 data = mi2,                  
+                 FUN = 'mean')               
+agg
+
+#Check computation
+mean(mi2$REC_IM[mi2$dec_grp == 5])
+mean(mi2$y_pred[mi2$dec_grp == 5])
+```
+Calibration Plot for LASSO
+```{r}
+# Create calibration plot
+plot(agg$y_pred,                        
+     agg$REC_IM,                           
+     xlim=c(0,1),
+     ylim=c(0,1),
+     main = 'Calibration Plot',           
+     ylab = 'Observed Event Rate',       
+     xlab = 'Predicted Probabilities',   
+     pch = 19,                           
+     col = 'orangered',                  
+     cex = 2)                            
+
+# Add identity line
+abline(a = 0,                            
+       b = 1)                            
+
+# Add fitted regression line
+cal.fit <- lm(REC_IM ~ y_pred, data = agg) 
+abline(cal.fit,                        
+       lty = 2,                         
+       col = 'royalblue',               
+       lwd = 3)                         
+
+#Confidence interval for fit
+summary(cal.fit)                      
+confint(cal.fit)
+```
+# Discrimination of LASSO (k-NN)
+```{r}
+# Plot density of predicted probabilities by event status
+ggplot(mi2,                           
+       aes(y_pred,                    
+           fill=as.factor(REC_IM))) +   
+  geom_density(alpha = 0.2) +            
+  scale_fill_manual(                   
+    values=c("orangered", "royalblue"))
+```
+
+```{r}
+#Create ROC curve plot and compute AUC 
+
+roc.mod <- roc(mi2$REC_IM,       
+               mi2$y_pred)    
+
+#Plot curve
+plot.roc(roc.mod,
+         xlim=c(1, 0),
+         ylim=c(0, 1))
+#Area under curve
+auc(roc.mod)                  
+ci.auc(roc.mod)              
+```
+## Logistic Regression on Median Imputation
+Model built on variables selected by SAS stepwise selection for a logistic model.
+```{r}
+#Find parameter estimates
+log.df <- glm(REC_IM~NA_R_3_n+ np_01+AGE+zab_leg_01, data=mi1, family = 'binomial')
+summary(log.df)
+```
+Predicting MI Relapse Based on Logistic Regression
+```{r}
+Y_pred <- predict(log.df,type='response')
+summary(Y_pred)
+
+#Assigning to dataset
+mi1$y_pred <- Y_pred
+```
+# Calibration for Regression
+```{r}
+#Calibration in the large
+mean(mi1$y_pred)      
+mean(mi1$REC_IM)
+
+#Prepare data for calibration plot  
+
+#Compute deciles
+dec <- quantile(mi1$y_pred,            
+                probs=seq(0,1,by=0.1), 
+                type=3)                
+dec 
+
+#Add deciles as variable
+mi1$dec_grp <- cut(mi1$y_pred,         
+                   breaks = dec,       
+                   include.lowest = T, 
+                   labels = 1:10)      
+
+#Verify groups are even 
+table(mi1$dec_grp)                    
+prop.table(table(mi1$dec_grp))         
+
+#Compute mean predicted probability and event rate by decile group
+mi1$y_pred <- as.numeric(mi1$y_pred)
+summary(mi1$y_pred)
+
+agg <- aggregate(cbind(REC_IM, y_pred) ~ dec_grp, 
+                 data = mi1,                  
+                 FUN = 'mean')               
+agg
+
+#Check computations
+mean(mi1$REC_IM[mi1$dec_grp == 5])
+mean(mi1$y_pred[mi1$dec_grp == 5])
+```
+Calibration Plot for Regression on Median Imputation
+```{r}
+#Calibration Plot
+plot(agg$y_pred,                         
+     agg$REC_IM,                            
+     xlim=c(0,1),
+     ylim=c(0,1),
+     main = 'Calibration Plot',           
+     ylab = 'Observed Event Rate',       
+     xlab = 'Predicted Probabilities',  
+     pch = 19,                          
+     col = 'orangered',                  
+     cex = 2)   
+
+# Add identity line
+abline(a = 0,                            
+       b = 1)                            
+
+# Add fitted regression line
+cal.fit <- lm(REC_IM ~ y_pred, data = agg)  
+abline(cal.fit,                         
+       lty = 2,                        
+       col = 'royalblue',               
+       lwd = 3)                         
+
+summary(cal.fit)                        
+confint(cal.fit)                        
+
+```
+# Discrimination for Logistic Regression (Median)
+```{r}
+# Plot density of predicted probabilities by event status
+
+ggplot(mi1,                           
+       aes(y_pred,                     
+           fill=as.factor(REC_IM))) +   
+  geom_density(alpha = 0.2) +          
+  scale_fill_manual(                    
+    values=c("orangered", "royalblue"))
+
+```
+
+```{r}
+#Create ROC curve plot and compute AUC 
+
+roc.mod <- roc(mi1$REC_IM,      
+               mi1$y_pred)    
+plot.roc(roc.mod)             
+auc(roc.mod)                  
+ci.auc(roc.mod)               
+
+```
+
+## Logistic Regression based on k-NN
+Model built on variables selected by SAS stepwise selection for a logistic model.
+```{r}
+#Model
+#Find parameter estimates (based on stepwise selection in SAS)
+logk.df <- glm(REC_IM~NA_R_3_n+ np_01 +AGE+ GEPAR_S_n+ ritm_ecg_p_07, data=mi2, family = 'binomial')
+summary(logk.df)
+```
+Predicting Y Based on Logistic Regression
+```{r}
+Y_pred <- predict(logk.df,type='response')
+summary(Y_pred)
+
+#Add to dataset
+mi2$y_pred <- Y_pred
+```
+# Calibration for Logistic Regression based on k-NN
+```{r}
+#Calibration in the large
+mean(mi2$y_pred)      
+mean(mi2$REC_IM)
+
+#Prepare data for calibration
+#Compute deciles
+dec <- quantile(mi2$y_pred,            
+                probs=seq(0,1,by=0.1), 
+                type=3)                
+dec 
+
+#Add to dataset
+mi2$dec_grp <- cut(mi2$y_pred,         
+                   breaks = dec,       
+                   include.lowest = T, 
+                   labels = 1:10)      
+
+#Check for accuracy
+table(mi2$dec_grp)                  
+prop.table(table(mi2$dec_grp))         
+
+#Compute mean predicted probability and event rate by decile group
+mi2$y_pred <- as.numeric(mi2$y_pred)
+summary(mi2$y_pred)
+
+agg <- aggregate(cbind(REC_IM, y_pred) ~ dec_grp, 
+                 data = mi2,                  
+                 FUN = 'mean')               
+agg
+
+#Check computations
+mean(mi2$REC_IM[mi2$dec_grp == 5])
+mean(mi2$y_pred[mi2$dec_grp == 5])
+```
+Calibration Plot for Regression (k-NN)
+```{r}
+# --- Create calibration plot
+plot(agg$y_pred,                         
+     agg$REC_IM,                           
+     xlim=c(0,1),
+     ylim=c(0,1),
+     main = 'Calibration Plot',           
+     ylab = 'Observed Event Rate',       
+     xlab = 'Predicted Probabilities',   
+     pch = 19,                           
+     col = 'orangered',                  
+     cex = 2)                           
+
+# Add identity line
+abline(a = 0,                            
+       b = 1)                            
+
+# Add fitted regression line
+cal.fit <- lm(REC_IM ~ y_pred, data = agg) 
+abline(cal.fit,                         
+       lty = 2,                        
+       col = 'royalblue',              
+       lwd = 3)                        
+
+summary(cal.fit)                        
+confint(cal.fit)                        
+```
+# Discrimination for Logistic Regression (k-NN)
+```{r}
+#Plot density of predicted probabilities by event status
+
+ggplot(mi2,                        
+       aes(y_pred,                    
+           fill=as.factor(REC_IM))) +  
+  geom_density(alpha = 0.2) +         
+  scale_fill_manual(                   
+    values=c("orangered", "royalblue"))
+
+```
+
+```{r}
+#Create ROC curve plot and compute AUC 
+
+roc.mod <- roc(mi2$REC_IM,        
+               mi2$y_pred)    
+plot.roc(roc.mod)             
+auc(roc.mod)                 
+ci.auc(roc.mod)               
+
+```
+## Best subset selection (k-NN)
+Best Subset with handpicked variables comprised of variables that were clinically relevant and/or previously selected in a model.
+```{r}
+#Selecting appropriate columns
+which (colnames(mi2)== "SEX")
+mi2.bglm <- mi2[,c(2,3, 18, 26,28, 50, 89, 92, 99)]
+
+#Add outcome column
+mi2.bglm <- cbind(mi2.bglm, mi2$REC_IM)
+print(colnames(mi2.bglm))
+names(mi2.bglm)[10] <- "y"
+head(mi2.bglm)
+
+#Best subset selection using BIC
+bsub.bic.fit <- bestglm(mi2.bglm,
+                        IC = "BIC",                 
+                        family=binomial)
+
+#Output
+summary(bsub.bic.fit$BestModel)
+bsub.bic.fit$Subsets
+
+```
+Predicting Y Based on k-NN Best subset
+```{r}
+#Create matrix
+names_vec <- c("Intercept", "AGE", "np_01", "NA_R_3_n")
+values_vec <- c(-4.114249, 0.027420, 15.887429, 1.038542)
+
+bsub.df <- data.frame(
+  names = names_vec,
+  values = values_vec,
+  stringsAsFactors = FALSE  
+)
+is.numeric(bsub.df$values)
+```
+
+```{r}
+#Predict log odds ratio
+cols_to_include <- setdiff(bsub.df$names, "Intercept")
+subset_mi2 <- mi2[, cols_to_include, drop = FALSE]
+
+bsub.df2 <- bsub.df[-1, ]
+subset_mi2[] <- lapply(subset_mi2, as.numeric)
+
+Y_pred <- -4.114249 + as.matrix(subset_mi2[, bsub.df2$names]) %*% as.vector(bsub.df2$values)
+head(Y_pred)
+summary(Y_pred)
+
+#Turn log odds into P()
+y_pred <- exp(Y_pred) / (1+exp(Y_pred))
+head(y_pred)
+summary(y_pred)
+
+#Assign to dataset
+mi2$y_pred <- y_pred
+```
+# Calibration for Best Subset (k-NN)
+```{r}
+#Calibration in the large
+mean(mi2$y_pred)       
+mean(mi2$REC_IM)
+
+#Prepare data
+#Compute deciles
+dec <- quantile(mi2$y_pred,            
+                probs=seq(0,1,by=0.1), 
+                type=3)                
+dec 
+
+#Create decile group variable 
+mi2$dec_grp <- cut(mi2$y_pred,         
+                   breaks = dec,       
+                   include.lowest = T, 
+                   labels = 1:10)      
+
+#Check that decile groups created correctly 
+table(mi2$dec_grp)                  
+prop.table(table(mi2$dec_grp))         
+
+#Compute mean predicted probability and event rate by decile group
+mi2$y_pred <- as.numeric(mi2$y_pred)
+summary(mi2$y_pred)
+
+agg <- aggregate(cbind(REC_IM, y_pred) ~ dec_grp, 
+                 data = mi2,                  
+                 FUN = 'mean')               
+agg
+
+#Check computations for decile group 5
+mean(mi2$REC_IM[mi2$dec_grp == 5])
+mean(mi2$y_pred[mi2$dec_grp == 5])
+```
+Calibration Plot for Regression (k-NN)
+```{r}
+#Create calibration plot
+plot(agg$y_pred,                         
+     agg$REC_IM,                          
+     xlim=c(0,1),
+     ylim=c(0,1),
+     main = 'Calibration Plot',           
+     ylab = 'Observed Event Rate',     
+     xlab = 'Predicted Probabilities',   
+     pch = 19,                           
+     col = 'orangered',                   
+     cex = 2)                            
+
+# Add identity line
+abline(a = 0,                            
+       b = 1)                           
+
+# Add fitted regression line
+cal.fit <- lm(REC_IM ~ y_pred, data = agg) 
+abline(cal.fit,                        
+       lty = 2,                       
+       col = 'royalblue',               
+       lwd = 3)                   
+
+summary(cal.fit)                        
+confint(cal.fit)                      
+
+```
+# Discrimination for Best Subset (k-NN)
+```{r}
+#Plot density of predicted probabilities by event status
+
+ggplot(mi2,                         
+       aes(y_pred,                     
+           fill=as.factor(REC_IM))) +   
+  geom_density(alpha = 0.2) +          
+  scale_fill_manual(                    
+    values=c("orangered", "royalblue"))
+
+```
+
+```{r}
+#Create ROC curve plot and compute AUC 
+
+roc.mod <- roc(mi2$REC_IM,       
+               mi2$y_pred)    
+plot.roc(roc.mod)             
+auc(roc.mod)                 
+ci.auc(roc.mod)               
+```
